@@ -40,7 +40,7 @@ const MODEL_MAPPING = {
   'kimi-k2': 'moonshotai/kimi-k2-instruct',
   'deepseek-uncensored': 'nicoboss/DeepSeek-R1-Distill-Qwen-32B-Uncensored',
   'hermes-3-llama-3.1':   'nousresearch/hermes-3-llama-3.1-405b:free',
-  'deepseek-v4': 'deepseek-ai/deepseek-v4-pro-0813',
+  'deepseek-v4.1': 'deepseek-ai/deepseek-v4.1-flash',
   'llama-3.3': 'meta-llama/Llama-3.3-70B-Instruct',
   'qwen': 'Qwen/Qwen3-32B',
 };
