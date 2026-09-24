@@ -43,7 +43,7 @@ const MODEL_MAPPING = {
   'deepseek-v4.1': 'deepseek-ai/deepseek-v4.1-flash',
   'llama-3.3': 'meta-llama/Llama-3.3-70B-Instruct',
   'qwen': 'Qwen/Qwen3-32B',
-  'GLM': 'z-ai/glm-5.2',
+  'glm': 'z-ai/glm-5.2',
 };
 
 // Root endpoint
