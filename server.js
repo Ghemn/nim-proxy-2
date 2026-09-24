@@ -33,16 +33,16 @@ const MODEL_MAPPING = {
   'gpt-4': 'deepseek-ai/deepseek-v3.1-terminus',
   'gpt-4-turbo': 'deepseek-ai/deepseek-v3.2',
   'gpt-4o': 'deepseek-ai/deepseek-v3.1',
-  'llama' 'deepseek-ai/deepseek-v4-pro'
+  'llama': 'deepseek-ai/deepseek-v4-pro',
   'claude-3-opus': 'openai/gpt-oss-120b',
   'claude-3-sonnet': 'openai/gpt-oss-20b',
   'gemini-pro': 'moonshotai/kimi-k2.5',
-  'kimi-k2' 'moonshotai/kimi-k2-instruct',
-  'deepseek-uncensored' 'nicoboss/DeepSeek-R1-Distill-Qwen-32B-Uncensored',
-  'hermes-3-llama-3.1'   'nousresearch/hermes-3-llama-3.1-405b:free',
-  'deepseek-v4' 'deepseek-ai/deepseek-v4-pro',
-  'llama-3.3' 'meta-llama/Llama-3.3-70B-Instruct',
-  'qwen' 'Qwen/Qwen3-32B',
+  'kimi-k2': 'moonshotai/kimi-k2-instruct',
+  'deepseek-uncensored': 'nicoboss/DeepSeek-R1-Distill-Qwen-32B-Uncensored',
+  'hermes-3-llama-3.1':   'nousresearch/hermes-3-llama-3.1-405b:free',
+  'deepseek-v4': 'deepseek-ai/deepseek-v4-pro',
+  'llama-3.3': 'meta-llama/Llama-3.3-70B-Instruct',
+  'qwen': 'Qwen/Qwen3-32B',
 };
 
 // Root endpoint
