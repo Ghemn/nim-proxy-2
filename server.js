@@ -45,7 +45,7 @@ const MODEL_MAPPING = {
   'qwen': 'Qwen/Qwen3-32B',
   'glm': 'z-ai/glm-5.2',
   'glm-5.3': 'z-ai/glm-5.3',
-  'deepseek-v4new': 'deepseek-ai/deepseek-v4-pro-0813'
+  'deepseek-v4new': 'deepseek-ai/deepseek-v4-pro-0813',
   'kimik3': 'moonshotai/kimi-k3'
 };
 
