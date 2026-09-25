@@ -47,7 +47,9 @@ const MODEL_MAPPING = {
   'glm-5.3': 'z-ai/glm-5.3',
   'glm-5.3-flash': 'z-ai/glm-5.3-flash',
   'deepseek-v4new': 'deepseek-ai/deepseek-v4-pro-0813',
-  'kimik3': 'moonshotai/kimi-k3'
+  'kimik3': 'moonshotai/kimi-k3',
+  'nemotron-lightning': 'nvidia/nemotron-3.5-lightning-30b-a3b',
+  'nemotron-ultra': 'nvidia/nemotron-3-ultra-550b-a55b'
 };
 
 // Root endpoint
