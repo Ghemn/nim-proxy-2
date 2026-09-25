@@ -164,7 +164,7 @@ app.post('/v1/chat/completions', async (req, res) => {
       messages: messages,
       temperature: temperature !== undefined ? temperature : 0.6,
       max_tokens: max_tokens || 9024,
-      stream: stream || false
+      stream: false
     };
 
     if (ENABLE_THINKING_MODE) {
@@ -299,6 +299,7 @@ app.post('/v1/chat/completions', async (req, res) => {
       };
       
       console.log('Sending response to client');
+      console.log('OPENAI RESPONSE:', JSON.stringify(openaiResponse, null, 2));
       res.json(openaiResponse);
     }
     
