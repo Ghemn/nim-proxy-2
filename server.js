@@ -27,6 +27,10 @@ const SHOW_REASONING = false; // Set to true to show reasoning with <think> tags
 // 🔥 THINKING MODE TOGGLE - Enables thinking for specific models that support it
 const ENABLE_THINKING_MODE = false; // Set to true to enable chat_template_kwargs thinking parameter
 
+// GLM-5.3 reasoning control
+// GLM-5.3 supports: low, high, max
+const GLM_REASONING_EFFORT = 'low';
+
 // Model mapping (adjust based on available NIM models)
 const MODEL_MAPPING = {
   'gpt-3.5-turbo': 'nvidia/llama-3.1-nemotron-ultra-253b-v1',
@@ -161,18 +165,40 @@ app.post('/v1/chat/completions', async (req, res) => {
       }
     }
     
-    // Transform OpenAI request to NIM format
-    const nimRequest = {
-      model: nimModel,
-      messages: messages,
-      temperature: temperature !== undefined ? temperature : 0.6,
-      max_tokens: max_tokens || 9024,
-      stream: stream || false
-    };
+// Transform OpenAI request to NIM format
+const nimRequest = {
+  model: nimModel,
+  messages: messages,
+  temperature: temperature !== undefined ? temperature : 0.6,
+  max_tokens: max_tokens || 9024,
+  stream: stream || false
+};
 
-    if (ENABLE_THINKING_MODE) {
-      nimRequest.extra_body = { chat_template_kwargs: { thinking: true } };
+// GLM-5.3 / GLM-5.3-Flash specific reasoning configuration
+if (
+  nimModel === 'z-ai/glm-5.3' ||
+  nimModel === 'z-ai/glm-5.3-flash'
+) {
+  nimRequest.chat_template_kwargs = {
+    reasoning_effort: GLM_REASONING_EFFORT,
+    clear_thinking: true
+  };
+
+  console.log(
+    `${nimModel} reasoning effort: ${GLM_REASONING_EFFORT}`
+  );
+}
+
+// Existing thinking-mode support for other models
+if (ENABLE_THINKING_MODE && 
+    nimModel !== 'z-ai/glm-5.3' &&
+    nimModel !== 'z-ai/glm-5.3-flash') {
+  nimRequest.extra_body = {
+    chat_template_kwargs: {
+      thinking: true
     }
+  };
+}
     
     console.log('Sending request to NVIDIA NIM:', JSON.stringify(nimRequest, null, 2));
     
