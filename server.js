@@ -179,10 +179,7 @@ if (
   nimModel === 'z-ai/glm-5.3' ||
   nimModel === 'z-ai/glm-5.3-flash'
 ) {
-  nimRequest.chat_template_kwargs = {
-    reasoning_effort: GLM_REASONING_EFFORT,
-    clear_thinking: true
-  };
+  nimRequest.reasoning_effort = GLM_REASONING_EFFORT;
 
   console.log(
     `${nimModel} reasoning effort: ${GLM_REASONING_EFFORT}`
@@ -190,9 +187,11 @@ if (
 }
 
 // Existing thinking-mode support for other models
-if (ENABLE_THINKING_MODE && 
-    nimModel !== 'z-ai/glm-5.3' &&
-    nimModel !== 'z-ai/glm-5.3-flash') {
+if (
+  ENABLE_THINKING_MODE &&
+  nimModel !== 'z-ai/glm-5.3' &&
+  nimModel !== 'z-ai/glm-5.3-flash'
+) {
   nimRequest.extra_body = {
     chat_template_kwargs: {
       thinking: true
