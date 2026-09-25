@@ -44,6 +44,7 @@ const MODEL_MAPPING = {
   'llama-3.3': 'meta-llama/Llama-3.3-70B-Instruct',
   'qwen': 'Qwen/Qwen3-32B',
   'glm': 'z-ai/glm-5.2',
+  'glm-5.3': 'z-ai/glm-5.3'
 };
 
 // Root endpoint
