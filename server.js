@@ -265,15 +265,6 @@ if (response.status >= 400) {
 
   console.error('NVIDIA API error body:', response.data);
 
-  return res.status(response.status).json({
-    error: {
-      message: response.data?.error?.message || 'NVIDIA API request failed',
-      type: 'invalid_request_error',
-      code: response.status,
-      details: response.data
-    }
-  });
-}
       return res.status(response.status).json({
         error: {
           message: response.data?.error?.message || 'NVIDIA API request failed',
