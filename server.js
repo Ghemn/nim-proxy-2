@@ -2,6 +2,7 @@
 const express = require('express');
 const cors = require('cors');
 const axios = require('axios');
+const GLM_REASONING_EFFORT = 'low';
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -162,19 +163,43 @@ app.post('/v1/chat/completions', async (req, res) => {
     }
     
     // Transform OpenAI request to NIM format
-    const nimRequest = {
-      model: nimModel,
-      messages: messages,
-      temperature: temperature !== undefined ? temperature : 0.6,
-      max_tokens: max_tokens || 9024,
-      stream: stream || false
-    };
+const nimRequest = {
+  model: nimModel,
+  messages: messages,
+  temperature: temperature !== undefined ? temperature : 0.6,
+  max_tokens: max_tokens || 9024,
+  stream: stream || false
+};
 
-    if (ENABLE_THINKING_MODE) {
-      nimRequest.extra_body = { chat_template_kwargs: { thinking: true } };
+// GLM-5.3 / GLM-5.3-Flash specific reasoning configuration
+if (
+  nimModel === 'z-ai/glm-5.3' ||
+  nimModel === 'z-ai/glm-5.3-flash'
+) {
+  nimRequest.reasoning_effort = GLM_REASONING_EFFORT;
+
+  console.log(
+    `${nimModel} reasoning effort: ${GLM_REASONING_EFFORT}`
+  );
+}
+
+// Existing thinking-mode support for other models
+if (
+  ENABLE_THINKING_MODE &&
+  nimModel !== 'z-ai/glm-5.3' &&
+  nimModel !== 'z-ai/glm-5.3-flash'
+) {
+  nimRequest.extra_body = {
+    chat_template_kwargs: {
+      thinking: true
     }
-    
-    console.log('Sending request to NVIDIA NIM:', JSON.stringify(nimRequest, null, 2));
+  };
+}
+
+console.log(
+  'Sending request to NVIDIA NIM:',
+  JSON.stringify(nimRequest, null, 2)
+);
     
     // Make request to NVIDIA NIM API
     const response = await axios.post(`${NIM_API_BASE}/chat/completions`, nimRequest, {
@@ -187,12 +212,68 @@ app.post('/v1/chat/completions', async (req, res) => {
     });
     
     // Check for errors
-    if (response.status >= 400) {
-      console.error(
-  'NVIDIA API error:',
-  error.response?.status,
-  error.response?.data
-);
+if (response.status >= 400) {
+  console.error('NVIDIA API error status:', response.status);
+  console.error('NVIDIA API error headers:', response.headers);
+
+  if (stream && response.data) {
+    // NVIDIA returned an error while using streaming
+    let errorBody = '';
+
+    response.data.on('data', (chunk) => {
+      errorBody += chunk.toString();
+    });
+
+    response.data.on('end', () => {
+      console.error('NVIDIA API error body:', errorBody);
+
+      try {
+        const parsedError = JSON.parse(errorBody);
+
+        res.status(response.status).json({
+          error: {
+            message: parsedError?.error?.message || 'NVIDIA API request failed',
+            type: 'invalid_request_error',
+            code: response.status,
+            details: parsedError
+          }
+        });
+      } catch {
+        res.status(response.status).json({
+          error: {
+            message: errorBody || 'NVIDIA API request failed',
+            type: 'invalid_request_error',
+            code: response.status
+          }
+        });
+      }
+    });
+
+    response.data.on('error', (err) => {
+      console.error('Error reading NVIDIA error response:', err);
+      res.status(response.status).json({
+        error: {
+          message: 'NVIDIA API request failed',
+          type: 'invalid_request_error',
+          code: response.status
+        }
+      });
+    });
+
+    return;
+  }
+
+  console.error('NVIDIA API error body:', response.data);
+
+  return res.status(response.status).json({
+    error: {
+      message: response.data?.error?.message || 'NVIDIA API request failed',
+      type: 'invalid_request_error',
+      code: response.status,
+      details: response.data
+    }
+  });
+}
       return res.status(response.status).json({
         error: {
           message: response.data?.error?.message || 'NVIDIA API request failed',
