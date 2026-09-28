@@ -188,7 +188,11 @@ app.post('/v1/chat/completions', async (req, res) => {
     
     // Check for errors
     if (response.status >= 400) {
-      console.error('NVIDIA API error:', response.status, response.data);
+      console.error(
+  'NVIDIA API error:',
+  error.response?.status,
+  error.response?.data
+);
       return res.status(response.status).json({
         error: {
           message: response.data?.error?.message || 'NVIDIA API request failed',
