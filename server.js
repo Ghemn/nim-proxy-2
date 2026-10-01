@@ -61,6 +61,7 @@ app.get('/', (req, res) => {
     endpoints: {
       health: '/health',
       models: '/v1/models',
+      model_list: '/v1/models',
       chat: '/v1/chat/completions'
     }
   });
