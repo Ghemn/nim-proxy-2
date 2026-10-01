@@ -78,20 +78,55 @@ app.get('/health', (req, res) => {
 });
 
 // List models endpoint (OpenAI compatible)
-app.get('/v1/models', (req, res) => {
-  const models = Object.keys(MODEL_MAPPING).map(model => ({
+// Supports both /v1/models and /models for maximum frontend compatibility.
+function getModelList() {
+  const created = Math.floor(Date.now() / 1000);
+
+  return Object.keys(MODEL_MAPPING).map(model => ({
     id: model,
     object: 'model',
-    created: Date.now(),
+    created: created,
     owned_by: 'nvidia-nim-proxy'
   }));
-  
+}
+
+function sendModelList(req, res) {
+  const models = getModelList();
+
+  console.log(
+    `[MODEL LIST] ${req.method} ${req.originalUrl} -> ${models.length} models`
+  );
+
+  res.status(200);
+
+  // Make sure SillyTavern always receives fresh JSON.
+  res.set({
+    'Content-Type': 'application/json; charset=utf-8',
+    'Cache-Control': 'no-store, no-cache, must-revalidate, proxy-revalidate',
+    'Pragma': 'no-cache',
+    'Expires': '0'
+  });
+
   res.json({
     object: 'list',
     data: models
   });
+}
+
+// Primary OpenAI-compatible endpoint.
+app.get('/v1/models', sendModelList);
+
+// Compatibility alias in case a client strips /v1.
+app.get('/models', sendModelList);
+
+// Allow OPTIONS requests cleanly for browser-based clients.
+app.options('/v1/models', (req, res) => {
+  res.sendStatus(204);
 });
 
+app.options('/models', (req, res) => {
+  res.sendStatus(204);
+});
 // Chat completions endpoint (main proxy)
 app.post('/v1/chat/completions', async (req, res) => {
   console.log('Received chat completion request');
