@@ -5,6 +5,11 @@ const axios = require('axios');
 
 const GLM_REASONING_EFFORT = 'low';
 
+// Automatic recovery for transient/empty NIM responses.
+const MAX_NIM_RETRIES = 2; // 2 retries = up to 3 total attempts
+const RETRY_DELAYS_MS = [750, 1500];
+const FIRST_TOKEN_TIMEOUT_MS = 45000;
+
 const app = express();
 const PORT = process.env.PORT || 3000;
 
@@ -50,6 +55,15 @@ const MODEL_MAPPING = {
   'nemotron-ultra': 'nvidia/nemotron-3-ultra-550b-a55b'
 };
 
+const RETRYABLE_STATUS_CODES = new Set([
+  408,
+  429,
+  500,
+  502,
+  503,
+  504
+]);
+
 function getModelList() {
   const created = Math.floor(Date.now() / 1000);
 
@@ -93,7 +107,7 @@ app.options('/models', (req, res) => res.sendStatus(204));
 app.get('/', (req, res) => {
   res.json({
     service: 'OpenAI to NVIDIA NIM Proxy',
-    version: '1.2.1',
+    version: '1.3.0',
     endpoints: {
       health: '/health',
       models: '/v1/models',
@@ -109,7 +123,9 @@ app.get('/health', (req, res) => {
     service: 'OpenAI to NVIDIA NIM Proxy',
     reasoning_display: SHOW_REASONING,
     thinking_mode: ENABLE_THINKING_MODE,
-    nim_api_configured: !!NIM_API_KEY
+    nim_api_configured: !!NIM_API_KEY,
+    automatic_retries: MAX_NIM_RETRIES,
+    first_token_timeout_ms: FIRST_TOKEN_TIMEOUT_MS
   });
 });
 
@@ -260,41 +276,316 @@ function applyModelSpecificParameters(
 }
 
 
-function handleNimResponseError(
-  error,
-  res
-) {
+// ============================================================
+// RETRY / RECOVERY HELPERS
+// ============================================================
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isRetryableStatus(status) {
+  return RETRYABLE_STATUS_CODES.has(status);
+}
+
+function isRetryableNetworkError(error) {
   if (error.response) {
-    const status = error.response.status;
-    const data = error.response.data;
-
-    console.error(
-      `[NIM ERROR] HTTP ${status}:`,
-      JSON.stringify(data, null, 2)
-    );
-
-    return res.status(status).json(data);
+    return false;
   }
 
-  console.error(
-    '[PROXY ERROR]',
-    error.message
-  );
+  const code = error.code;
 
-  return res.status(500).json({
-    error: {
-      message: error.message,
-      type: 'proxy_error'
-    }
+  return [
+    'ECONNRESET',
+    'ECONNABORTED',
+    'ETIMEDOUT',
+    'EPIPE',
+    'ENETUNREACH',
+    'EAI_AGAIN'
+  ].includes(code);
+}
+
+function isUsableChatResponse(data) {
+  const choice = data?.choices?.[0];
+
+  if (!choice) {
+    return false;
+  }
+
+  const content = choice.message?.content;
+
+  if (
+    typeof content === 'string' &&
+    content.trim().length > 0
+  ) {
+    return true;
+  }
+
+  // A tool call can be a legitimate non-text completion.
+  if (
+    Array.isArray(choice.message?.tool_calls) &&
+    choice.message.tool_calls.length > 0
+  ) {
+    return true;
+  }
+
+  return false;
+}
+
+function getTextCompletionText(data) {
+  const choice = data?.choices?.[0];
+  const content = choice?.message?.content;
+
+  return typeof content === 'string'
+    ? content
+    : '';
+}
+
+async function readNimErrorStream(stream) {
+  return new Promise((resolve) => {
+    let body = '';
+
+    stream.on('data', (chunk) => {
+      body += chunk.toString();
+    });
+
+    stream.on('end', () => resolve(body));
+
+    stream.on('error', () => resolve(body));
   });
 }
 
+function formatNimErrorBody(body) {
+  try {
+    return JSON.parse(body);
+  } catch {
+    return body;
+  }
+}
 
-async function streamNimResponse(
-  nimResponse,
-  res,
-  mode = 'chat'
+function logRetry(attempt, reason) {
+  const nextAttempt = attempt + 1;
+
+  const delay =
+    RETRY_DELAYS_MS[attempt - 1] ||
+    RETRY_DELAYS_MS[
+      RETRY_DELAYS_MS.length - 1
+    ];
+
+  console.warn(
+    `[RETRY] ${reason} | retry ${nextAttempt}/${MAX_NIM_RETRIES} in ${delay}ms`
+  );
+
+  return delay;
+}
+
+
+// ============================================================
+// NON-STREAMING NIM REQUEST WITH RETRIES
+// ============================================================
+
+async function requestNimWithRetries(
+  nimRequest,
+  isStreaming,
+  mode
 ) {
+  for (
+    let attempt = 1;
+    attempt <= MAX_NIM_RETRIES + 1;
+    attempt++
+  ) {
+    try {
+      const response = await axios.post(
+        `${NIM_API_BASE}/chat/completions`,
+        nimRequest,
+        {
+          headers: {
+            Authorization:
+              `Bearer ${NIM_API_KEY}`,
+            'Content-Type':
+              'application/json',
+            Accept: isStreaming
+              ? 'text/event-stream'
+              : 'application/json'
+          },
+
+          responseType:
+            isStreaming
+              ? 'stream'
+              : 'json',
+
+          timeout: 0,
+
+          validateStatus: () => true
+        }
+      );
+
+      // Successful HTTP response.
+      //
+      // We still check the generated content because NIM can
+      // occasionally return HTTP 200 without actually producing
+      // useful text.
+
+      if (
+        response.status >= 200 &&
+        response.status < 300
+      ) {
+        const usable = isStreaming
+          ? true
+          : mode === 'text'
+            ? getTextCompletionText(
+                response.data
+              ).trim().length > 0
+            : isUsableChatResponse(
+                response.data
+              );
+
+        if (usable) {
+          return response;
+        }
+
+        console.warn(
+          `[NIM ${mode.toUpperCase()}] HTTP 200 but no usable generated content was returned.`
+        );
+
+        if (attempt <= MAX_NIM_RETRIES) {
+          const delay = logRetry(
+            attempt,
+            'NIM returned an empty/invalid successful completion'
+          );
+
+          await sleep(delay);
+          continue;
+        }
+
+        return {
+          failed: true,
+          status: 502,
+          data: {
+            error: {
+              message:
+                'NVIDIA NIM returned an empty or invalid completion after automatic retries.',
+              type:
+                'empty_generation'
+            }
+          }
+        };
+      }
+
+      let errorData = response.data;
+
+      if (
+        errorData &&
+        typeof errorData.pipe ===
+          'function'
+      ) {
+        const errorBody =
+          await readNimErrorStream(
+            errorData
+          );
+
+        errorData =
+          formatNimErrorBody(
+            errorBody
+          );
+      }
+
+      console.error(
+        `[NIM ${mode.toUpperCase()} ERROR] HTTP ${response.status}:`,
+        typeof errorData === 'string'
+          ? errorData
+          : JSON.stringify(
+              errorData,
+              null,
+              2
+            )
+      );
+
+      if (
+        attempt <= MAX_NIM_RETRIES &&
+        isRetryableStatus(
+          response.status
+        )
+      ) {
+        const delay = logRetry(
+          attempt,
+          `NIM HTTP ${response.status}`
+        );
+
+        await sleep(delay);
+        continue;
+      }
+
+      return {
+        failed: true,
+        status: response.status,
+        data: errorData
+      };
+    } catch (error) {
+      const retryable =
+        isRetryableNetworkError(
+          error
+        );
+
+      console.error(
+        `[NIM ${mode.toUpperCase()} REQUEST ERROR]`,
+        error.code ||
+          error.message
+      );
+
+      if (
+        attempt <= MAX_NIM_RETRIES &&
+        retryable
+      ) {
+        const delay = logRetry(
+          attempt,
+          `NIM network error ${
+            error.code ||
+            error.message
+          }`
+        );
+
+        await sleep(delay);
+        continue;
+      }
+
+      throw error;
+    }
+  }
+
+  throw new Error(
+    'NIM retry loop ended unexpectedly'
+  );
+}
+
+
+function sendNimFailure(
+  res,
+  response,
+  label
+) {
+  console.error(
+    `[NIM ${label.toUpperCase()} FINAL ERROR] HTTP ${response.status}:`,
+    typeof response.data === 'string'
+      ? response.data
+      : JSON.stringify(
+          response.data,
+          null,
+          2
+        )
+  );
+
+  return res
+    .status(response.status)
+    .json(response.data);
+}
+
+
+// ============================================================
+// STREAMING
+// ============================================================
+
+function setStreamingHeaders(res) {
   res.setHeader(
     'Content-Type',
     'text/event-stream'
@@ -311,147 +602,707 @@ async function streamNimResponse(
   );
 
   res.flushHeaders();
+}
 
-  let buffer = '';
 
-  nimResponse.data.on(
-    'data',
-    (chunk) => {
-      buffer += chunk.toString();
+function parseSSELine(
+  line,
+  mode,
+  onContent,
+  onDone,
+  onRawData
+) {
+  const trimmed = line.trim();
 
-      const lines = buffer.split('\n');
+  if (!trimmed) {
+    return;
+  }
 
-      buffer = lines.pop() || '';
+  if (
+    trimmed ===
+    'data: [DONE]'
+  ) {
+    onDone();
+    return;
+  }
 
-      for (const line of lines) {
-        const trimmed = line.trim();
+  if (
+    !trimmed.startsWith('data:')
+  ) {
+    return;
+  }
 
-        if (!trimmed) {
-          continue;
-        }
+  const jsonText =
+    trimmed
+      .slice(5)
+      .trim();
 
-        if (trimmed === 'data: [DONE]') {
-          if (mode === 'text') {
-            res.write(
-              'data: [DONE]\n\n'
-            );
-          } else {
-            res.write(
-              'data: [DONE]\n\n'
-            );
-          }
+  if (!jsonText) {
+    return;
+  }
 
-          continue;
-        }
-
-        if (!trimmed.startsWith('data:')) {
-          continue;
-        }
-
-        const jsonText =
-          trimmed.slice(5).trim();
-
-        if (!jsonText) {
-          continue;
-        }
-
-        try {
-          const data =
-            JSON.parse(jsonText);
-
-          if (mode === 'text') {
-            // Convert an OpenAI chat-completion
-            // streaming chunk into a Text Completion
-            // streaming chunk for SillyTavern.
-
-            const choice =
-              data.choices &&
-              data.choices[0];
-
-            const delta =
-              choice &&
-              choice.delta;
-
-            const content =
-              delta &&
-              delta.content;
-
-            if (content) {
-              const textChunk = {
-                id:
-                  data.id ||
-                  `chatcmpl-${Date.now()}`,
-                object:
-                  'text_completion',
-                created:
-                  data.created ||
-                  Math.floor(
-                    Date.now() / 1000
-                  ),
-                model:
-                  data.model || '',
-                choices: [
-                  {
-                    text: content,
-                    index:
-                      choice.index || 0,
-                    logprobs: null,
-                    finish_reason:
-                      choice.finish_reason ||
-                      null
-                  }
-                ]
-              };
-
-              res.write(
-                `data: ${JSON.stringify(
-                  textChunk
-                )}\n\n`
-              );
-            }
-          } else {
-            // Normal Chat Completion stream.
-
-            res.write(
-              `data: ${JSON.stringify(
-                data
-              )}\n\n`
-            );
-          }
-        } catch (parseError) {
-          console.log(
-            '[STREAM] Could not parse chunk:',
-            jsonText
-          );
-        }
-      }
-    }
-  );
-
-  nimResponse.data.on(
-    'end',
-    () => {
-      res.end();
-    }
-  );
-
-  nimResponse.data.on(
-    'error',
-    (error) => {
-      console.error(
-        '[STREAM ERROR]',
-        error
+  try {
+    const data =
+      JSON.parse(
+        jsonText
       );
 
-      if (!res.headersSent) {
-        res.status(500);
-      }
+    const choice =
+      data.choices?.[0];
 
-      res.end();
+    const delta =
+      choice?.delta;
+
+    const content =
+      delta?.content;
+
+    if (content) {
+      if (mode === 'text') {
+        const textChunk = {
+          id:
+            data.id ||
+            `chatcmpl-${Date.now()}`,
+
+          object:
+            'text_completion',
+
+          created:
+            data.created ||
+            Math.floor(
+              Date.now() / 1000
+            ),
+
+          model:
+            data.model || '',
+
+          choices: [
+            {
+              text:
+                content,
+
+              index:
+                choice.index ||
+                0,
+
+              logprobs:
+                null,
+
+              finish_reason:
+                choice.finish_reason ||
+                null
+            }
+          ]
+        };
+
+        onContent(
+          `data: ${JSON.stringify(
+            textChunk
+          )}\n\n`
+        );
+      } else {
+        onContent(
+          `data: ${JSON.stringify(
+            data
+          )}\n\n`
+        );
+      }
+    } else if (
+      mode === 'chat'
+    ) {
+      // Preserve non-content chat chunks
+      // such as role/finish metadata.
+      onRawData(
+        `data: ${JSON.stringify(
+          data
+        )}\n\n`
+      );
+    }
+  } catch (parseError) {
+    console.log(
+      '[STREAM] Could not parse chunk:',
+      jsonText
+    );
+  }
+}
+
+
+function consumeStreamAttempt(
+  nimResponse,
+  res,
+  mode
+) {
+  return new Promise(
+    (resolve) => {
+      const stream =
+        nimResponse.data;
+
+      let buffer = '';
+      let outputStarted =
+        false;
+
+      let completed =
+        false;
+
+      let timedOut =
+        false;
+
+      const pendingOutput =
+        [];
+
+      let firstTokenTimer;
+
+
+      const finish = (
+        success,
+        reason
+      ) => {
+        if (completed) {
+          return;
+        }
+
+        completed = true;
+
+        clearTimeout(
+          firstTokenTimer
+        );
+
+        resolve({
+          success,
+          reason,
+          outputStarted
+        });
+      };
+
+
+      const flushPending =
+        () => {
+          if (
+            !outputStarted ||
+            !res.headersSent
+          ) {
+            return;
+          }
+
+          while (
+            pendingOutput.length >
+            0
+          ) {
+            res.write(
+              pendingOutput.shift()
+            );
+          }
+        };
+
+
+      const emit =
+        (data) => {
+          if (!data) {
+            return;
+          }
+
+          if (!outputStarted) {
+            outputStarted =
+              true;
+
+            setStreamingHeaders(
+              res
+            );
+          }
+
+          pendingOutput.push(
+            data
+          );
+
+          flushPending();
+        };
+
+
+      const emitRaw =
+        (data) => {
+          if (!data) {
+            return;
+          }
+
+          // For Chat Completion mode, preserve
+          // metadata chunks before/around content.
+          //
+          // Text Completion mode does not need these.
+
+          if (
+            mode === 'chat'
+          ) {
+            if (
+              outputStarted
+            ) {
+              res.write(
+                data
+              );
+            } else {
+              pendingOutput.push(
+                data
+              );
+            }
+          }
+        };
+
+
+      const handleLine =
+        (line) => {
+          parseSSELine(
+            line,
+            mode,
+            emit,
+            () => {
+              if (
+                outputStarted
+              ) {
+                res.write(
+                  'data: [DONE]\n\n'
+                );
+
+                finish(
+                  true,
+                  'done'
+                );
+              } else {
+                finish(
+                  false,
+                  'NIM returned [DONE] without generated content'
+                );
+              }
+            },
+            emitRaw
+          );
+        };
+
+
+      firstTokenTimer =
+        setTimeout(
+          () => {
+            timedOut =
+              true;
+
+            console.warn(
+              `[RETRY] NIM stream produced no usable text within ${FIRST_TOKEN_TIMEOUT_MS}ms`
+            );
+
+            stream.destroy();
+
+            finish(
+              false,
+              'first-token timeout'
+            );
+          },
+          FIRST_TOKEN_TIMEOUT_MS
+        );
+
+
+      stream.on(
+        'data',
+        (chunk) => {
+          if (completed) {
+            return;
+          }
+
+          buffer +=
+            chunk.toString();
+
+          const lines =
+            buffer.split(
+              '\n'
+            );
+
+          buffer =
+            lines.pop() ||
+            '';
+
+          for (
+            const line
+            of lines
+          ) {
+            if (
+              completed
+            ) {
+              break;
+            }
+
+            handleLine(
+              line
+            );
+          }
+        }
+      );
+
+
+      stream.on(
+        'end',
+        () => {
+          if (completed) {
+            return;
+          }
+
+          if (
+            buffer.trim()
+          ) {
+            handleLine(
+              buffer
+            );
+          }
+
+          if (!completed) {
+            if (
+              outputStarted
+            ) {
+              finish(
+                true,
+                'stream ended'
+              );
+            } else {
+              finish(
+                false,
+                'NIM stream ended without generated content'
+              );
+            }
+          }
+        }
+      );
+
+
+      stream.on(
+        'error',
+        (error) => {
+          if (completed) {
+            return;
+          }
+
+          if (timedOut) {
+            finish(
+              false,
+              'first-token timeout'
+            );
+
+            return;
+          }
+
+          if (
+            outputStarted
+          ) {
+            console.error(
+              '[STREAM ERROR AFTER OUTPUT]',
+              error.message
+            );
+
+            finish(
+              true,
+              'stream error after output'
+            );
+          } else {
+            console.error(
+              '[STREAM ERROR BEFORE OUTPUT]',
+              error.message
+            );
+
+            finish(
+              false,
+              `stream error: ${
+                error.code ||
+                error.message
+              }`
+            );
+          }
+        }
+      );
     }
   );
 }
 
+
+async function streamNimWithRetries(
+  nimRequest,
+  res,
+  mode
+) {
+  for (
+    let attempt = 1;
+    attempt <= MAX_NIM_RETRIES + 1;
+    attempt++
+  ) {
+    let nimResponse;
+
+    try {
+      nimResponse =
+        await axios.post(
+          `${NIM_API_BASE}/chat/completions`,
+          nimRequest,
+          {
+            headers: {
+              Authorization:
+                `Bearer ${NIM_API_KEY}`,
+
+              'Content-Type':
+                'application/json',
+
+              Accept:
+                'text/event-stream'
+            },
+
+            responseType:
+              'stream',
+
+            timeout:
+              0,
+
+            validateStatus:
+              () => true
+          }
+        );
+    } catch (error) {
+      const retryable =
+        isRetryableNetworkError(
+          error
+        );
+
+      console.error(
+        `[NIM ${mode.toUpperCase()} STREAM REQUEST ERROR]`,
+        error.code ||
+          error.message
+      );
+
+      if (
+        attempt <=
+          MAX_NIM_RETRIES &&
+        retryable
+      ) {
+        const delay =
+          logRetry(
+            attempt,
+            `NIM streaming network error ${
+              error.code ||
+              error.message
+            }`
+          );
+
+        await sleep(
+          delay
+        );
+
+        continue;
+      }
+
+      throw error;
+    }
+
+
+    if (
+      nimResponse.status <
+        200 ||
+      nimResponse.status >=
+        300
+    ) {
+      let errorData =
+        nimResponse.data;
+
+      if (
+        errorData &&
+        typeof errorData.pipe ===
+          'function'
+      ) {
+        const errorBody =
+          await readNimErrorStream(
+            errorData
+          );
+
+        errorData =
+          formatNimErrorBody(
+            errorBody
+          );
+      }
+
+      console.error(
+        `[NIM ${mode.toUpperCase()} STREAM ERROR] HTTP ${nimResponse.status}:`,
+        typeof errorData ===
+          'string'
+          ? errorData
+          : JSON.stringify(
+              errorData,
+              null,
+              2
+            )
+      );
+
+      if (
+        attempt <=
+          MAX_NIM_RETRIES &&
+        isRetryableStatus(
+          nimResponse.status
+        )
+      ) {
+        const delay =
+          logRetry(
+            attempt,
+            `NIM streaming HTTP ${nimResponse.status}`
+          );
+
+        await sleep(
+          delay
+        );
+
+        continue;
+      }
+
+      return res
+        .status(
+          nimResponse.status
+        )
+        .json(
+          errorData
+        );
+    }
+
+
+    const result =
+      await consumeStreamAttempt(
+        nimResponse,
+        res,
+        mode
+      );
+
+
+    if (
+      result.success
+    ) {
+      if (
+        !res.writableEnded
+      ) {
+        res.end();
+      }
+
+      return;
+    }
+
+
+    // Once actual text has reached ST, we cannot
+    // safely retry because ST already has part of
+    // the previous answer.
+
+    if (
+      result.outputStarted ||
+      res.headersSent
+    ) {
+      console.warn(
+        `[STREAM] Output had already started; ending instead of retrying: ${result.reason}`
+      );
+
+      if (
+        !res.writableEnded
+      ) {
+        res.end();
+      }
+
+      return;
+    }
+
+
+    if (
+      attempt <=
+      MAX_NIM_RETRIES
+    ) {
+      const delay =
+        logRetry(
+          attempt,
+          result.reason
+        );
+
+      await sleep(
+        delay
+      );
+
+      continue;
+    }
+
+
+    // All retries failed before producing text.
+    // Give ST a real error rather than an empty
+    // successful response.
+
+    console.error(
+      `[STREAM] All ${
+        MAX_NIM_RETRIES + 1
+      } attempts failed before generated text.`
+    );
+
+    return res
+      .status(502)
+      .json({
+        error: {
+          message:
+            'NVIDIA NIM failed to produce a usable response after automatic retries.',
+
+          type:
+            'upstream_generation_error',
+
+          attempts:
+            MAX_NIM_RETRIES + 1,
+
+          reason:
+            result.reason
+        }
+      });
+  }
+}
+
+
+// ============================================================
+// GENERIC ERROR HANDLER
+// ============================================================
+
+function handleNimResponseError(
+  error,
+  res
+) {
+  if (error.response) {
+    const status =
+      error.response.status;
+
+    const data =
+      error.response.data;
+
+    console.error(
+      `[NIM ERROR] HTTP ${status}:`,
+      JSON.stringify(
+        data,
+        null,
+        2
+      )
+    );
+
+    return res
+      .status(status)
+      .json(data);
+  }
+
+  console.error(
+    '[PROXY ERROR]',
+    error.message
+  );
+
+  return res
+    .status(500)
+    .json({
+      error: {
+        message:
+          error.message,
+
+        type:
+          'proxy_error'
+      }
+    });
+}
+
+
+// ============================================================
+// OPENAI CHAT RESPONSE FORMAT
+// ============================================================
 
 function createOpenAIChatResponse(
   nimData
@@ -491,30 +1342,37 @@ app.post(
   async (req, res) => {
     try {
       if (!NIM_API_KEY) {
-        return res.status(500).json({
-          error: {
-            message:
-              'NIM_API_KEY is not configured',
-            type:
-              'configuration_error'
-          }
-        });
+        return res
+          .status(500)
+          .json({
+            error: {
+              message:
+                'NIM_API_KEY is not configured',
+
+              type:
+                'configuration_error'
+            }
+          });
       }
 
-      const body = req.body || {};
+      const body =
+        req.body || {};
 
       const requestedModel =
         body.model;
 
       if (!requestedModel) {
-        return res.status(400).json({
-          error: {
-            message:
-              'Missing model',
-            type:
-              'invalid_request_error'
-          }
-        });
+        return res
+          .status(400)
+          .json({
+            error: {
+              message:
+                'Missing model',
+
+              type:
+                'invalid_request_error'
+            }
+          });
       }
 
       const nimModel =
@@ -523,13 +1381,16 @@ app.post(
         );
 
       const nimRequest = {
-        model: nimModel,
+        model:
+          nimModel,
+
         messages:
           body.messages || []
       };
 
-      // Forward EVERYTHING except fields controlled
-      // by the proxy itself.
+      // Forward EVERYTHING except fields
+      // controlled by the proxy itself.
+
       forwardParameters(
         body,
         nimRequest,
@@ -547,105 +1408,50 @@ app.post(
 
       console.log(
         '[CHAT] Forwarded parameters:',
-        Object.keys(nimRequest)
+        Object.keys(
+          nimRequest
+        )
       );
 
       const isStreaming =
         body.stream === true;
 
-      const nimResponse =
-        await axios.post(
-          `${NIM_API_BASE}/chat/completions`,
-          nimRequest,
-          {
-            headers: {
-              Authorization:
-                `Bearer ${NIM_API_KEY}`,
-              'Content-Type':
-                'application/json',
-              Accept: isStreaming
-                ? 'text/event-stream'
-                : 'application/json'
-            },
-
-            responseType:
-              isStreaming
-                ? 'stream'
-                : 'json',
-
-            timeout: 0,
-
-            validateStatus:
-              (status) => status < 500
-          }
-        );
-
-      if (
-        nimResponse.status < 200 ||
-        nimResponse.status >= 300
-      ) {
-        console.error(
-          `[NIM CHAT ERROR] HTTP ${nimResponse.status}:`,
-          JSON.stringify(
-            nimResponse.data
-          )
-        );
-
-        if (
-          nimResponse.data &&
-          typeof nimResponse.data.pipe ===
-            'function'
-        ) {
-          let errorBody = '';
-
-          nimResponse.data.on(
-            'data',
-            (chunk) => {
-              errorBody +=
-                chunk.toString();
-            }
-          );
-
-          nimResponse.data.on(
-            'end',
-            () => {
-              try {
-                const parsed =
-                  JSON.parse(errorBody);
-
-                res
-                  .status(nimResponse.status)
-                  .json(parsed);
-              } catch {
-                res
-                  .status(nimResponse.status)
-                  .send(errorBody);
-              }
-            }
-          );
-
-          return;
-        }
-
-        return res
-          .status(nimResponse.status)
-          .json(nimResponse.data);
-      }
 
       if (isStreaming) {
-        return streamNimResponse(
-          nimResponse,
+        return streamNimWithRetries(
+          nimRequest,
           res,
           'chat'
         );
       }
+
+
+      const nimResponse =
+        await requestNimWithRetries(
+          nimRequest,
+          false,
+          'chat'
+        );
+
+      if (
+        nimResponse.failed
+      ) {
+        return sendNimFailure(
+          res,
+          nimResponse,
+          'chat'
+        );
+      }
+
 
       const response =
         createOpenAIChatResponse(
           nimResponse.data
         );
 
-      return res.json(response);
+      return res.json(
+        response
+      );
     } catch (error) {
       return handleNimResponseError(
         error,
@@ -688,30 +1494,37 @@ app.post(
   async (req, res) => {
     try {
       if (!NIM_API_KEY) {
-        return res.status(500).json({
-          error: {
-            message:
-              'NIM_API_KEY is not configured',
-            type:
-              'configuration_error'
-          }
-        });
+        return res
+          .status(500)
+          .json({
+            error: {
+              message:
+                'NIM_API_KEY is not configured',
+
+              type:
+                'configuration_error'
+            }
+          });
       }
 
-      const body = req.body || {};
+      const body =
+        req.body || {};
 
       const requestedModel =
         body.model;
 
       if (!requestedModel) {
-        return res.status(400).json({
-          error: {
-            message:
-              'Missing model',
-            type:
-              'invalid_request_error'
-          }
-        });
+        return res
+          .status(400)
+          .json({
+            error: {
+              message:
+                'Missing model',
+
+              type:
+                'invalid_request_error'
+            }
+          });
       }
 
       const prompt =
@@ -725,12 +1538,16 @@ app.post(
         );
 
       const nimRequest = {
-        model: nimModel,
+        model:
+          nimModel,
 
         messages: [
           {
-            role: 'user',
-            content: prompt
+            role:
+              'user',
+
+            content:
+              prompt
           }
         ]
       };
@@ -770,115 +1587,55 @@ app.post(
 
       console.log(
         '[TEXT] Forwarded parameters:',
-        Object.keys(nimRequest)
+        Object.keys(
+          nimRequest
+        )
       );
 
       const isStreaming =
         body.stream === true;
 
-      const nimResponse =
-        await axios.post(
-          `${NIM_API_BASE}/chat/completions`,
-          nimRequest,
-          {
-            headers: {
-              Authorization:
-                `Bearer ${NIM_API_KEY}`,
-              'Content-Type':
-                'application/json',
-              Accept: isStreaming
-                ? 'text/event-stream'
-                : 'application/json'
-            },
-
-            responseType:
-              isStreaming
-                ? 'stream'
-                : 'json',
-
-            timeout: 0,
-
-            validateStatus:
-              (status) => status < 500
-          }
-        );
-
-      if (
-        nimResponse.status < 200 ||
-        nimResponse.status >= 300
-      ) {
-        console.error(
-          `[NIM TEXT ERROR] HTTP ${nimResponse.status}:`,
-          JSON.stringify(
-            nimResponse.data
-          )
-        );
-
-        if (
-          nimResponse.data &&
-          typeof nimResponse.data.pipe ===
-            'function'
-        ) {
-          let errorBody = '';
-
-          nimResponse.data.on(
-            'data',
-            (chunk) => {
-              errorBody +=
-                chunk.toString();
-            }
-          );
-
-          nimResponse.data.on(
-            'end',
-            () => {
-              try {
-                const parsed =
-                  JSON.parse(errorBody);
-
-                res
-                  .status(nimResponse.status)
-                  .json(parsed);
-              } catch {
-                res
-                  .status(nimResponse.status)
-                  .send(errorBody);
-              }
-            }
-          );
-
-          return;
-        }
-
-        return res
-          .status(nimResponse.status)
-          .json(nimResponse.data);
-      }
 
       if (isStreaming) {
-        return streamNimResponse(
-          nimResponse,
+        return streamNimWithRetries(
+          nimRequest,
           res,
           'text'
         );
       }
 
+
+      const nimResponse =
+        await requestNimWithRetries(
+          nimRequest,
+          false,
+          'text'
+        );
+
+      if (
+        nimResponse.failed
+      ) {
+        return sendNimFailure(
+          res,
+          nimResponse,
+          'text'
+        );
+      }
+
+
       const chatData =
         nimResponse.data;
+
+      const generatedText =
+        getTextCompletionText(
+          chatData
+        );
+
 
       const choice =
         chatData.choices &&
         chatData.choices[0];
 
-      const message =
-        choice &&
-        choice.message;
-
-      const generatedText =
-        message &&
-        message.content
-          ? message.content
-          : '';
 
       const completionResponse = {
         id:
@@ -899,9 +1656,15 @@ app.post(
 
         choices: [
           {
-            text: generatedText,
-            index: 0,
-            logprobs: null,
+            text:
+              generatedText,
+
+            index:
+              0,
+
+            logprobs:
+              null,
+
             finish_reason:
               choice &&
               choice.finish_reason
@@ -935,16 +1698,21 @@ app.post(
 // route parsing problems with newer Express versions.
 // ============================================================
 
-app.use((req, res) => {
-  res.status(404).json({
-    error: {
-      message:
-        `Endpoint not found: ${req.method} ${req.originalUrl}`,
-      type:
-        'not_found'
-    }
-  });
-});
+app.use(
+  (req, res) => {
+    res
+      .status(404)
+      .json({
+        error: {
+          message:
+            `Endpoint not found: ${req.method} ${req.originalUrl}`,
+
+          type:
+            'not_found'
+        }
+      });
+  }
+);
 
 
 app.listen(
@@ -976,6 +1744,14 @@ app.listen(
 
     console.log(
       `Transparent parameter forwarding: ENABLED`
+    );
+
+    console.log(
+      `Automatic retries: ${MAX_NIM_RETRIES} retries (${MAX_NIM_RETRIES + 1} total attempts)`
+    );
+
+    console.log(
+      `First-token timeout: ${FIRST_TOKEN_TIMEOUT_MS}ms`
     );
   }
 );
