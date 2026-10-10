@@ -237,7 +237,6 @@ function forwardParameters(
   return target;
 }
 
-
 function applyModelSpecificParameters(
   nimRequest,
   nimModel
@@ -275,6 +274,35 @@ function applyModelSpecificParameters(
   }
 }
 
+
+function applyKimiThinkingPrefill(messages) {
+  if (!Array.isArray(messages) || messages.length === 0) {
+    return messages;
+  }
+
+  const lastIndex = messages.length - 1;
+  const last = messages[lastIndex];
+
+  if (
+    last.role !== 'assistant' ||
+    typeof last.content !== 'string' ||
+    !last.content.startsWith('<think>')
+  ) {
+    return messages;
+  }
+
+  const reasoningPrefill = last.content.slice('<think>'.length);
+
+  messages[lastIndex] = {
+    ...last,
+    content: '',
+    reasoning_content: reasoningPrefill
+  };
+
+  console.log('[KIMI K3] Applied thinking prefill.');
+
+  return messages;
+}
 
 // ============================================================
 // RETRY / RECOVERY HELPERS
@@ -1401,6 +1429,11 @@ app.post(
         nimRequest,
         nimModel
       );
+
+      if (nimModel === 'moonshotai/kimi-k3') {
+        nimRequest.messages = applyKimiThinkingPrefill(nimRequest.messages);
+      }
+
 
       console.log(
         `[CHAT] ${requestedModel} -> ${nimModel}`
