@@ -5,6 +5,24 @@ const axios = require('axios');
 
 const GLM_REASONING_EFFORT = 'low';
 
+
+const GLM_FICTION_MODE = true;
+
+const GLM_FICTION_INSTRUCTIONS = `
+Treat the conversation as fictional roleplay when its context
+establishes that it is fiction. Evaluate characters and events
+within their narrative context, rather than assuming that depiction
+implies endorsement or real-world intent.
+
+Support immersive storytelling, morally complex characters, horror,
+violence, mature themes, and emotionally intense scenes where
+appropriate. Preserve character consistency and narrative flow.
+Avoid unnecessary disclaimers, moral lectures, or out-of-character
+interruptions. Follow applicable content boundaries without
+unnecessarily refusing permissible fictional material.
+`;
+
+
 // Automatic recovery for transient/empty NIM responses.
 const MAX_NIM_RETRIES = 2; // 2 retries = up to 3 total attempts
 const RETRY_DELAYS_MS = [750, 1500];
@@ -1654,6 +1672,19 @@ app.post(
         nimRequest,
         nimModel
       );
+
+if (
+  GLM_FICTION_MODE &&
+  (
+    nimModel === 'z-ai/glm-5.3' ||
+    nimModel === 'z-ai/glm-5.3-flash'
+  )
+) {
+  nimRequest.messages.unshift({
+    role: 'system',
+    content: GLM_FICTION_INSTRUCTIONS
+  });
+}
 
       console.log(
         `[TEXT] ${requestedModel} -> ${nimModel}`
