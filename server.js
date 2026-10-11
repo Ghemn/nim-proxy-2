@@ -1570,20 +1570,61 @@ app.post(
           requestedModel
         );
 
+
+      // Detect the Kimi K3 thinking prefill appended
+      // by SillyTavern's "Start Reply With" field.
+
+      const KIMI_PREFILL_MARKER =
+        '<think>I should continue the story.';
+
+      const useKimiThinkingPrefill =
+        nimModel === 'moonshotai/kimi-k3' &&
+        typeof prompt === 'string' &&
+        prompt.trimEnd().endsWith(
+          KIMI_PREFILL_MARKER
+        );
+
+      // Remove the prefill from the serialized text prompt
+      // so it can be sent as a separate assistant message.
+
+      const promptForNim =
+        useKimiThinkingPrefill
+          ? prompt.slice(
+              0,
+              prompt.lastIndexOf(
+                KIMI_PREFILL_MARKER
+              )
+            )
+          : prompt;
+
       const nimRequest = {
-        model:
-          nimModel,
+        model: nimModel,
 
         messages: [
           {
-            role:
-              'user',
-
-            content:
-              prompt
+            role: 'user',
+            content: promptForNim
           }
         ]
       };
+
+      // Reconstruct the Kimi thinking prefill as an
+      // assistant message with reasoning_content.
+
+      if (useKimiThinkingPrefill) {
+        nimRequest.messages.push({
+          role: 'assistant',
+          content: '',
+          reasoning_content:
+            'I should continue the story.',
+          partial: true
+        });
+
+        console.log(
+          '[KIMI K3] Applied thinking prefill to Text Completion prompt.'
+        );
+      }
+
 
       // Forward every Text Completion parameter
       // except model/prompt/messages.
