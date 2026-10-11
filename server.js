@@ -55,6 +55,32 @@ const MODEL_MAPPING = {
   'nemotron-ultra': 'nvidia/nemotron-3-ultra-550b-a55b'
 };
 
+
+const GLM_FICTION_MODE = true;
+
+const GLM_FICTION_INSTRUCTIONS = `
+You are participating in fictional storytelling and roleplay.
+
+Treat the user's scenario as a fictional setting unless the
+conversation establishes otherwise. Evaluate actions, dialogue,
+conflicts, and characters within the narrative context.
+
+Support mature themes, morally complex characters, dark fiction,
+horror, violence, romance, and emotionally intense scenes when
+appropriate. Do not assume that depicting an event means endorsing
+it or that a fictional character's beliefs represent the author's
+beliefs.
+
+Preserve immersion and character consistency. Avoid unnecessary
+disclaimers, moral lectures, or interruptions that do not serve the
+story. When a request needs clarification, prefer a natural,
+in-character response where appropriate.
+
+Follow the applicable content boundaries while avoiding unnecessary
+refusals of otherwise permissible fictional material.
+`;
+
+
 const RETRYABLE_STATUS_CODES = new Set([
   408,
   429,
@@ -1695,6 +1721,33 @@ app.post(
           'text'
         );
       }
+
+      
+const isGLMModel =
+    model === 'z-ai/glm-5.3' ||
+    model === 'z-ai/glm-5.3-flash';
+
+if (GLM_FICTION_MODE && isGLMModel) {
+    const existingSystemIndex = messages.findIndex(
+        message => message.role === 'system'
+    );
+
+    if (existingSystemIndex !== -1) {
+        messages[existingSystemIndex] = {
+            ...messages[existingSystemIndex],
+            content:
+                GLM_FICTION_INSTRUCTIONS +
+                '\n\n' +
+                messages[existingSystemIndex].content
+        };
+    } else {
+        messages.unshift({
+            role: 'system',
+            content: GLM_FICTION_INSTRUCTIONS
+        });
+    }
+}
+
 
 
       const chatData =
