@@ -293,10 +293,37 @@ function applyModelSpecificParameters(
 }
 
 
+
 function applyKimiThinkingPrefill(messages) {
   if (!Array.isArray(messages) || messages.length === 0) {
     return messages;
   }
+
+  const lastIndex = messages.length - 1;
+  const last = messages[lastIndex];
+
+  if (
+    last.role !== 'assistant' ||
+    typeof last.content !== 'string' ||
+    !last.content.startsWith('<think>')
+  ) {
+    return messages;
+  }
+
+  const reasoningPrefill = last.content.slice('<think>'.length);
+
+  messages[lastIndex] = {
+    ...last,
+    content: '',
+    reasoning_content: reasoningPrefill,
+    partial: true
+  };
+
+  console.log('[KIMI K3] Applied thinking prefill.');
+
+  return messages;
+}
+
 
   const lastIndex = messages.length - 1;
   const last = messages[lastIndex];
@@ -1589,35 +1616,48 @@ app.post(
         );
 
 
-      // Detect the Kimi K3 thinking prefill appended
-      // by SillyTavern's "Start Reply With" field.
 
-      const KIMI_PREFILL_MARKER =
-        '<think>I should continue the story.';
+      // Detect a trailing, unfinished Kimi thinking prefill
+      // appended by SillyTavern's "Start Reply With" field.
+
+      const trimmedPrompt =
+        typeof prompt === 'string'
+          ? prompt.trimEnd()
+          : '';
+
+      const KIMI_THINK_OPEN = '<think>';
+      const KIMI_THINK_CLOSE = '</think>';
+
+      const kimiThinkOpenIndex =
+        trimmedPrompt.lastIndexOf(KIMI_THINK_OPEN);
+
+      const kimiThinkCloseIndex =
+        trimmedPrompt.lastIndexOf(KIMI_THINK_CLOSE);
 
       const useKimiThinkingPrefill =
         nimModel === 'moonshotai/kimi-k3' &&
         typeof prompt === 'string' &&
-        prompt.trimEnd().endsWith(
-          KIMI_PREFILL_MARKER
-        );
+        kimiThinkOpenIndex >= 0 &&
+        kimiThinkOpenIndex > kimiThinkCloseIndex &&
+        trimmedPrompt.length - kimiThinkOpenIndex <= 4000;
 
-      // Remove the prefill from the serialized text prompt
-      // so it can be sent as a separate assistant message.
+      // Separate the unfinished thinking prefill from the
+      // serialized prompt and send it as reasoning_content.
 
       const promptForNim =
         useKimiThinkingPrefill
-          ? prompt.slice(
-              0,
-              prompt.lastIndexOf(
-                KIMI_PREFILL_MARKER
-              )
-            )
+          ? trimmedPrompt.slice(0, kimiThinkOpenIndex)
           : prompt;
+
+      const kimiReasoningPrefill =
+        useKimiThinkingPrefill
+          ? trimmedPrompt.slice(
+              kimiThinkOpenIndex + KIMI_THINK_OPEN.length
+            )
+          : '';
 
       const nimRequest = {
         model: nimModel,
-
         messages: [
           {
             role: 'user',
@@ -1626,22 +1666,23 @@ app.post(
         ]
       };
 
-      // Reconstruct the Kimi thinking prefill as an
-      // assistant message with reasoning_content.
-
       if (useKimiThinkingPrefill) {
         nimRequest.messages.push({
           role: 'assistant',
           content: '',
-          reasoning_content:
-            'I should continue the story.',
+          reasoning_content: kimiReasoningPrefill,
           partial: true
         });
 
         console.log(
-          '[KIMI K3] Applied thinking prefill to Text Completion prompt.'
+          `[KIMI K3] Applied thinking prefill (${kimiReasoningPrefill.length} characters).`
+        );
+      } else if (nimModel === 'moonshotai/kimi-k3') {
+        console.log(
+          '[KIMI K3] No trailing <think> prefill detected; sending the prompt unchanged.'
         );
       }
+
 
 
       // Forward every Text Completion parameter
