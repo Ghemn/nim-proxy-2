@@ -324,31 +324,6 @@ function applyKimiThinkingPrefill(messages) {
   return messages;
 }
 
-
-  const lastIndex = messages.length - 1;
-  const last = messages[lastIndex];
-
-  if (
-    last.role !== 'assistant' ||
-    typeof last.content !== 'string' ||
-    !last.content.startsWith('<think>')
-  ) {
-    return messages;
-  }
-
-  const reasoningPrefill = last.content.slice('<think>'.length);
-
-  messages[lastIndex] = {
-    ...last,
-    content: '',
-    reasoning_content: reasoningPrefill
-  };
-
-  console.log('[KIMI K3] Applied thinking prefill.');
-
-  return messages;
-}
-
 // ============================================================
 // RETRY / RECOVERY HELPERS
 // ============================================================
