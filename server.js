@@ -40,10 +40,9 @@ const MODEL_MAPPING = {
   'gemini-pro': 'moonshotai/kimi-k2.5',
   'kimi-k2': 'moonshotai/kimi-k2-instruct',
   'deepseek-uncensored':
-    'nicoboss/DeepSeek-R1-Distill-Qwen-32B-Uncensored',
+  'nicoboss/DeepSeek-R1-Distill-Qwen-32B-Uncensored',
   'hermes-3-llama-3.1':
-    'nousresearch/hermes-3-llama-3.1-405b:free',
-  'deepseek-v4.1': 'deepseek-ai/deepseek-v4.1-flash',
+  'nousresearch/hermes-3-llama-3.1-405b:free',
   'llama-3.3': 'meta-llama/Llama-3.3-70B-Instruct',
   'qwen': 'Qwen/Qwen3-32B',
   'glm': 'z-ai/glm-5.2',
@@ -53,6 +52,8 @@ const MODEL_MAPPING = {
   'kimik3': 'moonshotai/kimi-k3',
   'nemotron-lightning': 'nvidia/nemotron-3.5-lightning-30b-a3b',
   'nemotron-ultra': 'nvidia/nemotron-3-ultra-550b-a55b'
+  'deepseek-v4.1': 'deepseek-ai/deepseek-v4.1-flash',
+  'mistral-large': 'mistralai/mistral-large-4-1t-a52b'
 };
 
 
