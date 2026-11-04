@@ -39,10 +39,8 @@ const MODEL_MAPPING = {
   'claude-3-sonnet': 'openai/gpt-oss-20b',
   'gemini-pro': 'moonshotai/kimi-k2.5',
   'kimi-k2': 'moonshotai/kimi-k2-instruct',
-  'deepseek-uncensored':
-  'nicoboss/DeepSeek-R1-Distill-Qwen-32B-Uncensored',
-  'hermes-3-llama-3.1':
-  'nousresearch/hermes-3-llama-3.1-405b:free',
+  'deepseek-uncensored': 'nicoboss/DeepSeek-R1-Distill-Qwen-32B-Uncensored',
+  'hermes-3-llama-3.1': 'nousresearch/hermes-3-llama-3.1-405b:free',
   'llama-3.3': 'meta-llama/Llama-3.3-70B-Instruct',
   'qwen': 'Qwen/Qwen3-32B',
   'glm': 'z-ai/glm-5.2',
