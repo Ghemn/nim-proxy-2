@@ -54,7 +54,6 @@ const MODEL_MAPPING = {
   'kimik3': 'moonshotai/kimi-k3',
   'nemotron-lightning': 'nvidia/nemotron-3.5-lightning-30b-a3b',
   'nemotron-ultra': 'nvidia/nemotron-3-ultra-550b-a55b',
-  'deepseek-v4.1': 'deepseek-ai/deepseek-v4.1-flash',
   'mistral-large': 'mistralai/mistral-large-4-1t-a52b'
 };
 
